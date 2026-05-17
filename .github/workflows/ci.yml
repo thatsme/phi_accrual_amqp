@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  OTP_VERSION: "28.0"
+  ELIXIR_VERSION: "1.19.0"
+
+jobs:
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    env:
+      MIX_ENV: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+
+      - name: Cache deps
+        uses: actions/cache@v4
+        with:
+          path: deps
+          key: deps-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-${{ hashFiles('mix.lock') }}
+
+      - name: Cache _build
+        uses: actions/cache@v4
+        with:
+          path: _build
+          key: build-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-${{ hashFiles('mix.lock') }}
+
+      - run: mix deps.get
+      - run: mix compile --warnings-as-errors
+      - run: mix test
+
+  integration:
+    name: Integration tests
+    runs-on: ubuntu-latest
+    env:
+      MIX_ENV: test
+      RABBITMQ_URL: amqp://localhost
+    services:
+      rabbitmq:
+        image: rabbitmq:4-management
+        ports:
+          - 5672:5672
+          - 15672:15672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+          --health-start-period 10s
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+
+      - name: Cache deps
+        uses: actions/cache@v4
+        with:
+          path: deps
+          key: deps-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-${{ hashFiles('mix.lock') }}
+
+      - name: Cache _build
+        uses: actions/cache@v4
+        with:
+          path: _build
+          key: build-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-${{ hashFiles('mix.lock') }}
+
+      - run: mix deps.get
+      - run: mix compile --warnings-as-errors
+
+      # Hard gate: GitHub Actions service health-cmd already waits
+      # for rabbitmq-diagnostics ping before steps run, but a TCP
+      # probe here makes the broker requirement explicit and ensures
+      # the integration suite's broker-unavailable [SKIP] fallback
+      # (which implicit-passes; see CHANGELOG known limitations) is
+      # unreachable in CI.
+      - name: Verify RabbitMQ reachable on localhost:5672
+        run: |
+          if ! timeout 5 bash -c '</dev/tcp/localhost/5672'; then
+            echo "::error::RabbitMQ service container not reachable on localhost:5672"
+            exit 1
+          fi
+
+      - run: mix test --include integration

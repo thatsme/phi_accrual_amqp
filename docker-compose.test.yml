@@ -1,0 +1,13 @@
+services:
+  rabbit:
+    image: rabbitmq:4-management
+    container_name: phi_accrual_amqp_test_broker
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s

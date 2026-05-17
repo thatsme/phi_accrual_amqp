@@ -55,6 +55,7 @@ defmodule PhiAccrualAmqp.MixProject do
 
   defp package do
     [
+      maintainers: ["Alessio Battistutta"],
       licenses: ["Apache-2.0"],
       links: %{
         "GitHub" => @source_url,

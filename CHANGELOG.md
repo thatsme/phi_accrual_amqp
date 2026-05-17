@@ -6,7 +6,7 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
-## [0.1.0] - TBD
+## [0.1.0] - 2026-05-17
 
 Initial public release. **Alpha** — public API and telemetry schema
 may change before `v1.0` based on real-deployment feedback.

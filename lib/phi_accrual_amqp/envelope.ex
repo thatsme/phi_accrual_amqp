@@ -21,11 +21,12 @@ defmodule PhiAccrualAmqp.Envelope do
 
   ## detector_key resolution
 
-  The detector key is the identity passed to `PhiAccrual.observe/1`.
+  The detector key is the identity passed to `PhiAccrual.observe/2`;
+  see `t:PhiAccrual.detector_key/0` for the value type.
   It is extracted from the delivery meta via a `:key_resolver`
-  function — a `(meta -> term() | nil)` mapping. Returning `nil`
-  yields `{:error, :no_detector_key}` and the delivery is dropped
-  with a telemetry event.
+  function — a `(meta -> PhiAccrual.detector_key() | nil)` mapping.
+  Returning `nil` yields `{:error, :no_detector_key}` and the
+  delivery is dropped with a telemetry event.
 
   The default resolver returns the `:routing_key` when it is a
   non-empty binary. This fits the common topic-exchange topology
@@ -50,11 +51,11 @@ defmodule PhiAccrualAmqp.Envelope do
   """
 
   @type meta :: map()
-  @type resolver :: (meta() -> term() | nil)
+  @type resolver :: (meta() -> PhiAccrual.detector_key() | nil)
   @type reason :: :no_detector_key | :resolver_raised
 
   @type t :: %__MODULE__{
-          detector_key: term(),
+          detector_key: PhiAccrual.detector_key(),
           timestamp: integer() | nil
         }
 
@@ -68,9 +69,10 @@ defmodule PhiAccrualAmqp.Envelope do
 
   ## Options
 
-    * `:key_resolver` — `(meta -> term() | nil)`. Defaults to
-      `default_key_resolver/1`, which returns `meta.routing_key` when
-      it is a non-empty binary.
+    * `:key_resolver` — `(meta -> PhiAccrual.detector_key() | nil)`.
+      Defaults to `default_key_resolver/1`, which returns
+      `meta.routing_key` when it is a non-empty binary. See
+      `t:PhiAccrual.detector_key/0`.
   """
   @spec extract(meta(), keyword()) :: {:ok, t()} | {:error, reason()}
   def extract(meta, opts \\ []) when is_map(meta) do
@@ -93,7 +95,7 @@ defmodule PhiAccrualAmqp.Envelope do
   Default key resolver: returns the `routing_key` when it is a
   non-empty binary, otherwise `nil`.
   """
-  @spec default_key_resolver(meta()) :: term() | nil
+  @spec default_key_resolver(meta()) :: PhiAccrual.detector_key() | nil
   def default_key_resolver(%{routing_key: rk}) when is_binary(rk) and byte_size(rk) > 0, do: rk
   def default_key_resolver(_), do: nil
 

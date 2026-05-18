@@ -40,10 +40,11 @@ defmodule PhiAccrualAmqp.MixProject do
 
   defp deps do
     [
-      {:phi_accrual, "~> 1.0"},
+      {:phi_accrual, "~> 1.1"},
       {:amqp, "~> 4.0"},
       {:telemetry, "~> 1.2"},
-      {:ex_doc, "~> 0.34", only: :dev, runtime: false}
+      {:ex_doc, "~> 0.34", only: :dev, runtime: false},
+      {:dialyxir, "~> 1.4", only: [:dev], runtime: false}
     ]
   end
 

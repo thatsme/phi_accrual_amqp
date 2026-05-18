@@ -4,6 +4,13 @@ Dedicated AMQP consumer source for [`phi_accrual`](https://hex.pm/packages/phi_a
 
 > WARNING **Alpha — `v0.1.x`.** Public API and telemetry schema may change before `v1.0` based on real-deployment feedback.
 
+> **Protocol: AMQP 0-9-1.** This transport uses AMQP 0-9-1 (the RabbitMQ
+> protocol) via the `amqp` client library. It works with **RabbitMQ** and
+> other AMQP 0-9-1 brokers. It does **not** work with AMQP 1.0 brokers such
+> as ActiveMQ Artemis, Apache Qpid, Azure Service Bus, or Solace — AMQP 1.0
+> is a different, incompatible protocol. A 1.0 transport, if it ever exists,
+> would be a separate package.
+
 ## Why a separate package
 
 The core `phi_accrual` library is intentionally transport-agnostic. Heartbeat transports live in their own packages so consumers can mix and match — UDP for decision-grade detection with no intermediary, BEAM distribution for observability-grade, AMQP when broker-mediated traffic is already the system's backbone. See the [phi_accrual roadmap](https://hexdocs.pm/phi_accrual/readme.html#roadmap) for the ecosystem rationale.

@@ -49,8 +49,8 @@ defmodule PhiAccrualAmqp.MixProject do
   end
 
   defp description do
-    "Dedicated AMQP consumer source for phi_accrual. " <>
-      "Treats broker deliveries as liveness signals; receiver-driven " <>
+    "Dedicated AMQP 0-9-1 consumer source for phi_accrual (RabbitMQ-class brokers; " <>
+      "not AMQP 1.0). Treats broker deliveries as liveness signals; receiver-driven " <>
       "clock discipline. Envelope timestamp is diagnostic-only."
   end
 

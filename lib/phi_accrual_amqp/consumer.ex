@@ -82,6 +82,10 @@ defmodule PhiAccrualAmqp.Consumer do
         measurements: %{}
         metadata:     %{reason, routing_key, exchange, queue}
         # reason ∈ [:no_detector_key, :resolver_raised]
+
+  The `:sample, :received` event name is shared with `phi_accrual_udp`, but
+  the payload shape differs (identity key `detector_key` vs `node`; timestamp
+  in metadata vs measurements). Handlers are not cross-transport drop-in.
   """
 
   use GenServer

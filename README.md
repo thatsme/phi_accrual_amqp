@@ -105,6 +105,26 @@ The consumer manages its own connection, channel, and subscription. On startup i
   # reason ∈ [:no_detector_key, :resolver_raised]
 ```
 
+### Cross-transport note
+
+The `[:phi_accrual_amqp, :sample, :received]` event shares its name with
+`[:phi_accrual_udp, :sample, :received]`, but the payloads are **not**
+interchangeable — a telemetry handler written for one transport will not
+work unchanged against the other:
+
+- **Identity key.** `phi_accrual_amqp` reports the monitored entity under
+  `metadata.detector_key`, matching the `t:PhiAccrual.detector_key/0` type in
+  `phi_accrual` core. `phi_accrual_udp` reports it under `metadata.node`.
+- **Diagnostic timestamp.** `phi_accrual_amqp` places it in `metadata`
+  (`envelope_timestamp`, nullable). `phi_accrual_udp` 1.x places it in
+  `measurements` (`packet_timestamp_ms`).
+
+These differences are deliberate, not oversights: `phi_accrual_amqp` uses
+`detector_key` because an AMQP source has no Erlang node, and keeps the
+nullable timestamp out of `measurements` so numeric aggregators are not fed
+`nil`. Convergence of the two transports' telemetry payloads is tracked for
+`phi_accrual_udp` 2.0.
+
 ## Running the tests
 
 Unit tests are broker-free and fast:

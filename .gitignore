@@ -25,3 +25,14 @@ phi_accrual_amqp-*.tar
 
 # Dialyzer PLTs
 /priv/plts/
+
+# Local context and working-notes files. Never part of the package, and
+# never committed -- listed here so that dropping one into the tree
+# cannot put it into public push history by accident.
+.claude
+CLAUDE.md
+GIULIA.md
+.giulia
+*project_context*
+*REBUILD_PLAN*
+*PHASE_*_RECAP*

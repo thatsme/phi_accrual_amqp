@@ -2,7 +2,7 @@
 
 Dedicated AMQP consumer source for [`phi_accrual`](https://hex.pm/packages/phi_accrual). Treats broker deliveries on a configured queue as liveness signals.
 
-> WARNING **Alpha — `v0.1.x`.** Public API and telemetry schema may change before `v1.0` based on real-deployment feedback.
+> WARNING **Alpha — `v0.x`.** Public API and telemetry schema may change before `v1.0` based on real-deployment feedback.
 
 > **Protocol: AMQP 0-9-1.** This transport uses AMQP 0-9-1 (the RabbitMQ
 > protocol) via the `amqp` client library. It works with **RabbitMQ** and
@@ -25,8 +25,8 @@ AMQP applications usually already publish messages that prove node liveness. A d
 # mix.exs
 def deps do
   [
-    {:phi_accrual, "~> 1.0"},
-    {:phi_accrual_amqp, "~> 0.1"}
+    {:phi_accrual, "~> 1.1"},
+    {:phi_accrual_amqp, "~> 0.2"}
   ]
 end
 ```
@@ -42,6 +42,8 @@ children = [
 ```
 
 Topology — exchange declaration, queue declaration, bindings — is your application's responsibility. The consumer subscribes to an existing queue.
+
+`:connection_opts` takes precedence over `:url`: when it is set, `:url` is ignored entirely rather than merged. A keyword list passed there is merged over the connection defaults, so anything given wins. The full option list, including `:connect`, is documented on `PhiAccrualAmqp.Consumer`.
 
 ## Running several consumers
 
@@ -117,6 +119,11 @@ An application that genuinely wants estimators torn down on disconnect can attac
 
 A server-initiated `basic.cancel` counts as a disconnect for this purpose. The consumer tears the connection down and reconnects, so `[:phi_accrual_amqp, :connection, :down]` fires with `reason: :server_cancelled` alongside the `[:consumer, :cancelled]` event that carries the consumer tag. Keys appear on the connection event only, so a policy layer attaches to one name and never has to reconcile overlapping key sets.
 
+### Bounding the tracked-key set
+
+The keys reported on disconnect are those the consumer has seen deliveries for, capped by `:max_tracked_keys` (default 1000). The cap matters because the default resolver returns the routing key: a wildcard binding can mint unbounded distinct keys. At the cap, the least-recently-seen key is evicted and `[:phi_accrual_amqp, :keys, :evicted]` fires — a signal that the binding or the resolver is broader than intended.
+
+
 ## Inspecting a consumer
 
 `PhiAccrualAmqp.Consumer.status/2` reports what a health endpoint needs:
@@ -145,11 +152,7 @@ Connections are opened with `heartbeat: 10` and `connection_timeout: 5_000`. The
 
 `start_link/1` validates its options and raises `ArgumentError` before the process starts. Unknown keys are rejected rather than ignored: a mistyped `:reconnect_min` would otherwise pass through `Keyword.get/3` and silently yield the default, which is the failure mode that costs an afternoon. Types are checked, and a `:reconnect_min_ms` above `:reconnect_max_ms` is refused rather than quietly clamped.
 
-Validation is hand-rolled rather than delegated to an options library. Ten flat options with no nesting do not justify a fourth runtime dependency on a package whose argument is that the core stays small by choice.
-
-### Bounding the tracked-key set
-
-The keys reported on disconnect are those the consumer has seen deliveries for, capped by `:max_tracked_keys` (default 1000). The cap matters because the default resolver returns the routing key: a wildcard binding can mint unbounded distinct keys. At the cap, the least-recently-seen key is evicted and `[:phi_accrual_amqp, :keys, :evicted]` fires — a signal that the binding or the resolver is broader than intended.
+Validation is hand-rolled rather than delegated to an options library. Nine flat options with no nesting do not justify a fourth runtime dependency on a package whose argument is that the core stays small by choice.
 
 ## Telemetry
 
@@ -203,11 +206,16 @@ work unchanged against the other:
   (`envelope_timestamp`, nullable). `phi_accrual_udp` 1.x places it in
   `measurements` (`packet_timestamp_ms`).
 
-These differences are deliberate, not oversights: `phi_accrual_amqp` uses
-`detector_key` because an AMQP source has no Erlang node, and keeps the
-nullable timestamp out of `measurements` so numeric aggregators are not fed
-`nil`. Convergence of the two transports' telemetry payloads is tracked for
-`phi_accrual_udp` 2.0.
+These differences are deliberate, and they are not scheduled to converge.
+`phi_accrual_amqp` uses `detector_key` because an AMQP source has no Erlang
+node, and keeps the nullable timestamp out of `measurements` so numeric
+aggregators are not fed `nil`.
+
+The transports are specializations of a transport-agnostic core rather than
+interchangeable adapters. The only contract binding them together is
+`PhiAccrual.observe/2`; each package's telemetry describes what its own
+transport actually carries, and per-transport handlers are the intended
+model rather than a gap awaiting closure.
 
 ## Running the tests
 
@@ -234,7 +242,10 @@ mix test.integration  # integration only
 
 `RABBITMQ_URL` overrides the default `amqp://localhost`. If no broker is reachable, the integration tests skip rather than fail.
 
-Requirements: OTP 28 / Elixir 1.19 (the `amqp` 4.x line — the 3.x line does not build on OTP 28).
+Requirements: Elixir `~> 1.15`, as declared in `mix.exs` and exercised in CI
+against Elixir 1.15.8 / OTP 26.2. Releases are built and verified on Elixir
+1.19 / OTP 28, which CI also covers; that combination requires the `amqp` 4.x
+line, since `amqp` 3.x does not build on OTP 28.
 
 ## License
 

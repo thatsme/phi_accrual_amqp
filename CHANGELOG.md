@@ -6,6 +6,8 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-20
+
 ### Added
 
 - **Option validation in `start_link/1`** — raises `ArgumentError` on
@@ -14,7 +16,7 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   most: a mistyped `:reconnect_min` previously passed through
   `Keyword.get/3` and silently yielded the default. Hand-rolled rather
   than delegated to an options library, which would be a fourth runtime
-  dependency for ten flat options.
+  dependency for nine flat options.
 - **`PhiAccrualAmqp.Consumer.status/2`** — reports `:connected?`,
   `:queue`, `:consumer_tag`, `:backoff_ms`, `:disconnected_since`,
   `:last_delivery_at` and `:keys_tracked`. The two timestamps are local
@@ -44,6 +46,13 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   defaults to `:name` when one is given, and otherwise to
   `{PhiAccrualAmqp.Consumer, queue}`, so one consumer per queue can be
   supervised together without spelling out an `:id`.
+
+### Fixed
+
+- **The consumer now traps exits, so `terminate/2` runs on supervisor
+  shutdown.** Without it the process was killed outright and the
+  connection — started under the `amqp_client` supervision tree rather
+  than linked to the consumer — outlived the consumer that opened it.
 
 ### Changed
 
@@ -134,5 +143,6 @@ Initial public release.
   reconnect race; the Consumer recovers via the normal reconnect
   path.
 
-[Unreleased]: https://github.com/thatsme/phi_accrual_amqp/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/thatsme/phi_accrual_amqp/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/thatsme/phi_accrual_amqp/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/thatsme/phi_accrual_amqp/releases/tag/v0.1.0

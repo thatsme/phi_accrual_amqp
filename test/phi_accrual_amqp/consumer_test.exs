@@ -645,4 +645,23 @@ defmodule PhiAccrualAmqp.ConsumerTest do
       assert [{:custom, _, :worker, _}] = Supervisor.which_children(sup)
     end
   end
+
+  describe "shutdown" do
+    test "traps exits so terminate/2 runs on supervisor shutdown" do
+      pid = start_offline()
+
+      # Without trap_exit the supervisor's exit signal kills the process
+      # outright and terminate/2 never closes the connection.
+      assert {:trap_exit, true} = Process.info(pid, :trap_exit)
+    end
+
+    test "a stopping consumer terminates cleanly" do
+      {:ok, pid} = Consumer.start_link(queue: "q.stop", connect: false)
+      ref = Process.monitor(pid)
+
+      :ok = GenServer.stop(pid)
+
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 1_000
+    end
+  end
 end

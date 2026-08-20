@@ -7,9 +7,10 @@ defmodule PhiAccrualAmqp.Consumer do
   configured queue, and on every delivery calls
   `PhiAccrual.observe(detector_key, receipt_ts)` where `receipt_ts`
   comes from `:erlang.monotonic_time(:millisecond)` at the instant
-  the delivery message lands in this GenServer's mailbox. The
-  detector key is extracted from the envelope by
-  `PhiAccrualAmqp.Envelope.extract/2`.
+  the delivery is processed — that is, when it is dequeued from this
+  GenServer's mailbox, not when it arrived there. Under a backlog the
+  two differ by the queueing delay. The detector key is extracted from
+  the envelope by `PhiAccrualAmqp.Envelope.extract/2`.
 
   ## Clock discipline (read this)
 
@@ -27,6 +28,32 @@ defmodule PhiAccrualAmqp.Consumer do
   them and you. A high phi value does NOT pin the fault on the
   publisher. If you need publisher-only liveness, choose a transport
   with no intermediary (e.g., `phi_accrual_udp`).
+
+  ## Options
+
+    * `:queue` (required) — the queue to consume from. Must already
+      exist; this package declares no topology.
+    * `:url` — broker URL, default `"amqp://localhost"`.
+    * `:connection_opts` — a URL or a keyword list passed to
+      `AMQP.Connection.open/1,2`. **Takes precedence over `:url`**: when
+      set, `:url` is ignored entirely. A keyword list is merged over the
+      connection defaults below, so anything given here wins.
+    * `:key_resolver` — `(meta -> PhiAccrual.detector_key() | nil)`,
+      default `Envelope.default_key_resolver/1`.
+    * `:reconnect_min_ms` — backoff floor, default 1000.
+    * `:reconnect_max_ms` — backoff ceiling, default 30_000. Must not be
+      below `:reconnect_min_ms`.
+    * `:max_tracked_keys` — cap on remembered detector keys, default
+      1000.
+    * `:name` — registers the process. Omitted, the consumer runs
+      unnamed so several can coexist in one supervision tree.
+    * `:connect` — whether to connect on start, default `true`. Setting
+      it to `false` starts a consumer that never opens a connection
+      until sent `:connect`; it exists so the delivery and lifecycle
+      paths can be exercised without a broker.
+
+  Unknown keys, mistyped values and a `:reconnect_min_ms` above
+  `:reconnect_max_ms` raise `ArgumentError` from `start_link/1`.
 
   ## Mapping deliveries to detector keys
 
@@ -206,7 +233,7 @@ defmodule PhiAccrualAmqp.Consumer do
   Defaults otherwise match `use GenServer`: `restart: :permanent`,
   `shutdown: 5_000`, `type: :worker`.
   """
-  @spec child_spec(opts()) :: Supervisor.child_spec()
+  @spec child_spec(keyword()) :: Supervisor.child_spec()
   def child_spec(opts) when is_list(opts) do
     {sup_opts, start_opts} = Keyword.split(opts, [:id, :restart, :shutdown])
 
@@ -250,8 +277,8 @@ defmodule PhiAccrualAmqp.Consumer do
   ## Blocking
 
   Connection attempts run synchronously inside the consumer, so a call
-  landing during one waits for it to finish. `@default_conn_opts` caps
-  that at `connection_timeout`, but a call can still block for seconds
+  landing during one waits for it to finish. The 5s
+  `connection_timeout` default caps that, but a call can still block
   against an unreachable broker — precisely when a health check is most
   likely to run. The `timeout` argument therefore defaults to 5000 rather
   than `:infinity`, and callers should be prepared for the exit.
@@ -270,7 +297,7 @@ defmodule PhiAccrualAmqp.Consumer do
   end
 
   # Hand-rolled rather than pulled in as a fourth runtime dependency:
-  # ten flat options with no nesting do not justify one on a package
+  # nine flat options with no nesting do not justify one on a package
   # whose argument is that the core stays small by choice. The check
   # that earns its keep is the unknown-key one — a typo'd
   # :reconnect_min sails through Keyword.get/3 and silently yields the
@@ -359,6 +386,12 @@ defmodule PhiAccrualAmqp.Consumer do
       last_delivery_at: nil,
       disconnected_since: :erlang.monotonic_time(:millisecond)
     }
+
+    # Without this, a supervisor shutdown kills the process outright and
+    # terminate/2 never runs. The AMQP connection is started under the
+    # amqp_client supervision tree rather than linked here, so it would
+    # outlive the consumer that opened it.
+    Process.flag(:trap_exit, true)
 
     if Keyword.get(opts, :connect, true) do
       send(self(), :connect)

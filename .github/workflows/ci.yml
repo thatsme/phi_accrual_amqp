@@ -10,33 +10,68 @@ env:
 
 jobs:
   test:
-    name: Unit tests
+    name: test (Elixir ${{ matrix.elixir }} / OTP ${{ matrix.otp }})
     runs-on: ubuntu-latest
     env:
       MIX_ENV: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The combination the project is developed and released on.
+          - elixir: "1.19.0"
+            otp: "28.0"
+            primary: true
+          # The floor declared by mix.exs (elixir: "~> 1.15"). OTP 26 is
+          # the newest OTP that Elixir 1.15 supports. Present so the
+          # floor is tested rather than asserted: if this entry fails,
+          # the real floor is higher and mix.exs should say so.
+          - elixir: "1.15.8"
+            otp: "26.2"
     steps:
       - uses: actions/checkout@v4
 
       - uses: erlef/setup-beam@v1
         with:
-          otp-version: ${{ env.OTP_VERSION }}
-          elixir-version: ${{ env.ELIXIR_VERSION }}
+          otp-version: ${{ matrix.otp }}
+          elixir-version: ${{ matrix.elixir }}
 
       - name: Cache deps
         uses: actions/cache@v4
         with:
           path: deps
-          key: deps-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-${{ hashFiles('mix.lock') }}
+          key: deps-${{ matrix.otp }}-${{ matrix.elixir }}-${{ hashFiles('mix.lock') }}
 
       - name: Cache _build
         uses: actions/cache@v4
         with:
           path: _build
-          key: build-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-${{ hashFiles('mix.lock') }}
+          key: build-${{ matrix.otp }}-${{ matrix.elixir }}-${{ hashFiles('mix.lock') }}
 
       - run: mix deps.get
       - run: mix compile --warnings-as-errors
       - run: mix test
+
+      # Formatter output and dialyzer findings both shift between Elixir
+      # and OTP releases, so these gates run on the primary combination
+      # only. Running them on the floor entry would report version drift
+      # as a code defect.
+      - name: Check formatting
+        if: matrix.primary
+        run: mix format --check-formatted
+
+      - name: Cache dialyzer PLT
+        if: matrix.primary
+        uses: actions/cache@v4
+        with:
+          path: priv/plts
+          key: plt-${{ matrix.otp }}-${{ matrix.elixir }}-${{ hashFiles('mix.lock') }}
+
+      - name: Dialyzer
+        if: matrix.primary
+        env:
+          MIX_ENV: dev
+        run: mix dialyzer --format github
 
   integration:
     name: Integration tests

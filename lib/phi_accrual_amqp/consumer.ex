@@ -37,7 +37,8 @@ defmodule PhiAccrualAmqp.Consumer do
     * `:connection_opts` — a URL or a keyword list passed to
       `AMQP.Connection.open/1,2`. **Takes precedence over `:url`**: when
       set, `:url` is ignored entirely. A keyword list is merged over the
-      connection defaults below, so anything given here wins.
+      connection defaults, so anything given there wins; a binary is a
+      URL, leaving the defaults in force.
     * `:key_resolver` — `(meta -> PhiAccrual.detector_key() | nil)`,
       default `Envelope.default_key_resolver/1`.
     * `:reconnect_min_ms` — backoff floor, default 1000.
@@ -48,9 +49,9 @@ defmodule PhiAccrualAmqp.Consumer do
     * `:name` — registers the process. Omitted, the consumer runs
       unnamed so several can coexist in one supervision tree.
     * `:connect` — whether to connect on start, default `true`. Setting
-      it to `false` starts a consumer that never opens a connection
-      until sent `:connect`; it exists so the delivery and lifecycle
-      paths can be exercised without a broker.
+      it to `false` starts a consumer that opens no connection; it
+      exists so the delivery and lifecycle paths can be exercised
+      without a broker.
 
   Unknown keys, mistyped values and a `:reconnect_min_ms` above
   `:reconnect_max_ms` raise `ArgumentError` from `start_link/1`.
@@ -93,6 +94,9 @@ defmodule PhiAccrualAmqp.Consumer do
       [:phi_accrual_amqp, :connection, :down]
         measurements: %{tracked}
         metadata:     %{queue, reason, keys}
+        # also fires on a server-initiated cancel, with
+        # reason: :server_cancelled, since that path tears the
+        # connection down too
         # tracked counts what :keys lists. The list is for policy; the
         # count is for a gauge, since Telemetry.Metrics cannot aggregate
         # a list.
@@ -261,7 +265,8 @@ defmodule PhiAccrualAmqp.Consumer do
     * `:connected?` — whether a connection and channel are currently open
     * `:queue` — the configured queue
     * `:consumer_tag` — the broker-assigned tag, or `nil` when unsubscribed
-    * `:backoff_ms` — the ceiling the next reconnect will draw below
+    * `:backoff_ms` — the ceiling the next reconnect draws up to,
+      inclusive; `0` before the first connection attempt
     * `:disconnected_since` — local monotonic ms at which the current
       outage began, or `nil` when connected
     * `:last_delivery_at` — local monotonic ms of the last delivery that

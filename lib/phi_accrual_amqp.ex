@@ -14,7 +14,13 @@ defmodule PhiAccrualAmqp do
       Does not parse the payload.
     * `PhiAccrualAmqp.Consumer` — GenServer that owns the connection,
       channel, and subscription. Calls `PhiAccrual.observe/2` per
-      delivery. Reconnects with backoff on broker / network failures.
+      delivery. Reconnects with jittered exponential backoff on broker
+      and network failures, so a fleet of consumers does not stampede a
+      recovering broker. Supplies `child_spec/1`, so one consumer per
+      queue can be supervised together, and `status/2` for health
+      checks. Options are validated at `start_link/1`, which raises
+      `ArgumentError` on unknown keys rather than silently defaulting
+      them.
 
   This package is **consumer-only**. AMQP applications typically
   already publish messages that prove node liveness, so a dedicated
@@ -36,6 +42,23 @@ defmodule PhiAccrualAmqp do
   Topology — exchange, queue declaration, bindings — is your
   application's responsibility. This package consumes from an
   existing queue.
+
+  ## What a disconnect means for the detector
+
+  When the connection drops the consumer stops feeding
+  `PhiAccrual.observe/2`, and φ for the affected keys climbs. That is
+  the detector answering its question correctly — nothing has been
+  heard from those entities — and the consumer does not attempt to
+  correct it. It does not own those estimators: `observe/2` auto-tracks,
+  so core materialises them, and other sources may feed the same key.
+  Core's only lever, `PhiAccrual.untrack/1`, destroys an estimator's
+  calibration outright, which is disproportionate to a transient blip.
+
+  What the consumer owes is legibility, not correction:
+  `[:phi_accrual_amqp, :connection, :down]` carries the detector keys it
+  was feeding, so a policy layer can read the excursion as a transport
+  outage rather than as evidence about the entities. See
+  `PhiAccrualAmqp.Consumer` for the full reasoning.
 
   ## Clock discipline
 

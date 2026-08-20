@@ -47,6 +47,10 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   `{PhiAccrualAmqp.Consumer, queue}`, so one consumer per queue can be
   supervised together without spelling out an `:id`.
 
+- **`:connect` and the `:connection_opts`-over-`:url` precedence rule
+  are now documented.** Both were observable behaviour with no
+  description in any document; neither is new in this release.
+
 ### Fixed
 
 - **The consumer now traps exits, so `terminate/2` runs on supervisor
@@ -79,8 +83,12 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   replaces the client's 60s (URI) and 50s (keyword) defaults, bounding
   how long a connection attempt — and any `status/2` call queued behind
   it — can block against a broker that accepts packets without
-  completing the handshake. Values passed in `:connection_opts` still
-  win.
+  completing the handshake. A keyword list passed as `:connection_opts`
+  is merged over them and wins; a binary `:connection_opts` is a URL,
+  so there is nothing to merge and the defaults stand — and they also
+  take precedence over the same values embedded in the URL's query
+  string, since the client resolves explicit options ahead of parsed
+  URI parameters.
 - **A server-initiated `basic.cancel` now emits
   `[:phi_accrual_amqp, :connection, :down]`** with
   `reason: :server_cancelled`, and marks the consumer disconnected.

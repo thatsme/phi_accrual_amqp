@@ -13,7 +13,7 @@ Dedicated AMQP consumer source for [`phi_accrual`](https://hex.pm/packages/phi_a
 
 ## Why a separate package
 
-The core `phi_accrual` library is intentionally transport-agnostic. Heartbeat transports live in their own packages so consumers can mix and match — UDP for decision-grade detection with no intermediary, BEAM distribution for observability-grade, AMQP when broker-mediated traffic is already the system's backbone. See the [phi_accrual roadmap](https://hexdocs.pm/phi_accrual/readme.html#roadmap) for the ecosystem rationale.
+The core `phi_accrual` library is intentionally transport-agnostic. Heartbeat transports live in their own packages so consumers can mix and match — UDP for decision-grade detection with no intermediary, BEAM distribution for observability-grade, AMQP when broker-mediated traffic is already the system's backbone. See the [phi_accrual roadmap](https://hexdocs.pm/phi_accrual/readme.html#roadmap) for the ecosystem rationale. That list names `phi_accrual_udp` and a planned `phi_accrual_libcluster`; it predates this package, so the omission is chronology rather than exclusion.
 
 ## Consumer-only by design
 
@@ -146,7 +146,7 @@ Connection attempts run synchronously inside the consumer, so a call that lands 
 
 ## Connection defaults
 
-Connections are opened with `heartbeat: 10` and `connection_timeout: 5_000`. The heartbeat matches the AMQP client's own default and is set explicitly so it stays pinned. The timeout is a deliberate tightening: the client otherwise allows 60s via a URI and 50s via a keyword list, which is how long a connection attempt — and any `status/2` call waiting behind it — can block against a broker that accepts packets but never completes the handshake. Both are overridden by anything passed in `:connection_opts`.
+Connections are opened with `heartbeat: 10` and `connection_timeout: 5_000`. The heartbeat matches the AMQP client's own default and is set explicitly so it stays pinned. The timeout is a deliberate tightening: the client otherwise allows 60s via a URI and 50s via a keyword list, which is how long a connection attempt — and any `status/2` call waiting behind it — can block against a broker that accepts packets but never completes the handshake. Both are overridden by a keyword list passed as `:connection_opts`, which is merged over them. A binary `:connection_opts` is a URL rather than a keyword list, so there is nothing to merge and the defaults stand — and because the client resolves explicit options ahead of URI query parameters, they also win over a `heartbeat` or `connection_timeout` embedded in the URL itself. A keyword list is the only form that can change them.
 
 ## Option validation
 
@@ -200,16 +200,19 @@ interchangeable — a telemetry handler written for one transport will not
 work unchanged against the other:
 
 - **Identity key.** `phi_accrual_amqp` reports the monitored entity under
-  `metadata.detector_key`, matching the `t:PhiAccrual.detector_key/0` type in
-  `phi_accrual` core. `phi_accrual_udp` reports it under `metadata.node`.
+  `metadata.detector_key`. Both `phi_accrual_udp` and `phi_accrual` core
+  itself use `metadata.node` — core emits `%{node, local_pause?}` on
+  `[:phi_accrual, :sample, :observed]`. This package is the one that
+  departs, deliberately: an AMQP source has no Erlang node, and
+  `detector_key` is the honest name for what the key actually holds. The
+  value type is unchanged — it is still a `t:PhiAccrual.detector_key/0`.
 - **Diagnostic timestamp.** `phi_accrual_amqp` places it in `metadata`
   (`envelope_timestamp`, nullable). `phi_accrual_udp` 1.x places it in
   `measurements` (`packet_timestamp_ms`).
 
 These differences are deliberate, and they are not scheduled to converge.
-`phi_accrual_amqp` uses `detector_key` because an AMQP source has no Erlang
-node, and keeps the nullable timestamp out of `measurements` so numeric
-aggregators are not fed `nil`.
+The timestamp stays out of `measurements` because it is nullable, and numeric
+aggregators should not be fed `nil`.
 
 The transports are specializations of a transport-agnostic core rather than
 interchangeable adapters. The only contract binding them together is

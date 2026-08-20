@@ -265,6 +265,8 @@ defmodule PhiAccrualAmqp.ConsumerTest do
       assert MapSet.size(delays) > 50
     end
 
+    # start_link/1 now rejects min > max, so this is defence in depth for
+    # direct callers rather than the de-facto validation it once was.
     test "degenerate config where min exceeds max still yields the floor" do
       assert {5_000, 5_000} = Consumer.backoff_delay(0, 5_000, 1_000)
     end
@@ -281,7 +283,10 @@ defmodule PhiAccrualAmqp.ConsumerTest do
       start_offline(
         [
           connection_opts: [host: "127.0.0.1", port: 1, connection_timeout: 200],
-          reconnect_min_ms: 60_000
+          # park the retry beyond the test's lifetime; min and max must
+          # agree or validation rejects the pair
+          reconnect_min_ms: 60_000,
+          reconnect_max_ms: 60_000
         ] ++ opts
       )
     end
@@ -457,6 +462,187 @@ defmodule PhiAccrualAmqp.ConsumerTest do
 
       assert %{backoff_ms: backoff} = Consumer.status(pid)
       assert backoff > 0
+    end
+  end
+
+  describe "telemetry measurements" do
+    test ":sample :received carries the exact value handed to observe/2" do
+      key = {:measured_node, System.unique_integer([:positive])}
+      pid = start_offline(key_resolver: fn _ -> key end)
+      ref = subscribe([[:phi_accrual_amqp, :sample, :received]])
+
+      # A wildly skewed envelope timestamp that must not reach the detector.
+      send(pid, {:basic_deliver, "p", %{routing_key: "x", exchange: "", timestamp: 0}})
+
+      assert_receive {:event, ^ref, _, %{monotonic_time: mono, system_time: sys}, _}, 500
+
+      refute mono == 0, "envelope timestamp leaked into the measurement"
+      assert is_integer(mono) and is_integer(sys)
+
+      # The measurement is not merely close to the observed value; it is
+      # the value, as recorded by the estimator core itself.
+      Process.sleep(50)
+      assert %{last_arrival_ts: ^mono} = PhiAccrual.inspect_state(key)
+    end
+
+    test ":sample :received monotonic_time tracks the local monotonic clock" do
+      pid = start_offline()
+      ref = subscribe([[:phi_accrual_amqp, :sample, :received]])
+
+      before = :erlang.monotonic_time(:millisecond)
+      deliver(pid, "k.clock")
+
+      assert_receive {:event, ^ref, _, %{monotonic_time: mono}, _}, 500
+
+      assert mono >= before
+      assert mono <= :erlang.monotonic_time(:millisecond)
+    end
+
+    test ":connection :down counts what :keys lists" do
+      pid = start_offline()
+      ref = subscribe([[:phi_accrual_amqp, :connection, :down]])
+
+      deliver(pid, "k.a")
+      deliver(pid, "k.b")
+      _ = :sys.get_state(pid)
+
+      send(pid, {:basic_cancel, %{consumer_tag: "ctag-1"}})
+
+      assert_receive {:event, ^ref, _, %{tracked: 2}, %{keys: keys}}, 1_000
+      assert length(keys) == 2
+    end
+
+    test ":consumer :registered carries system_time" do
+      pid = start_offline()
+      ref = subscribe([[:phi_accrual_amqp, :consumer, :registered]])
+
+      send(pid, {:basic_consume_ok, %{consumer_tag: "ctag-1"}})
+
+      assert_receive {:event, ^ref, _, %{system_time: sys}, _}, 500
+      assert is_integer(sys)
+    end
+
+    test ":consumer :cancelled carries system_time" do
+      pid = start_offline()
+      ref = subscribe([[:phi_accrual_amqp, :consumer, :cancelled]])
+
+      send(pid, {:basic_cancel, %{consumer_tag: "ctag-1"}})
+
+      assert_receive {:event, ^ref, _, %{system_time: sys}, _}, 500
+      assert is_integer(sys)
+    end
+
+    test ":extract :error carries system_time" do
+      pid = start_offline()
+      ref = subscribe([[:phi_accrual_amqp, :extract, :error]])
+
+      send(pid, {:basic_deliver, "p", %{routing_key: "", exchange: "x"}})
+
+      assert_receive {:event, ^ref, _, %{system_time: sys}, _}, 500
+      assert is_integer(sys)
+    end
+
+    test "no event ships an empty measurement map" do
+      pid = start_offline()
+
+      ref =
+        subscribe([
+          [:phi_accrual_amqp, :sample, :received],
+          [:phi_accrual_amqp, :extract, :error],
+          [:phi_accrual_amqp, :consumer, :cancelled]
+        ])
+
+      deliver(pid, "k.a")
+      send(pid, {:basic_deliver, "p", %{routing_key: "", exchange: "x"}})
+      send(pid, {:basic_cancel, %{consumer_tag: "ctag-1"}})
+
+      for _ <- 1..3 do
+        assert_receive {:event, ^ref, _, measurements, _}, 1_000
+        refute measurements == %{}
+      end
+    end
+  end
+
+  describe "option validation" do
+    test "rejects an unknown option rather than silently defaulting" do
+      assert_raise ArgumentError, ~r/unknown option \[:reconnect_min\]/, fn ->
+        Consumer.start_link(queue: "q", reconnect_min: 500, connect: false)
+      end
+    end
+
+    test "names every unknown option it found" do
+      assert_raise ArgumentError, ~r/unknown options \[:bogus, :nonsense\]/, fn ->
+        Consumer.start_link(queue: "q", bogus: 1, nonsense: 2, connect: false)
+      end
+    end
+
+    test "requires :queue" do
+      assert_raise ArgumentError, ~r/:queue is required/, fn ->
+        Consumer.start_link(connect: false)
+      end
+    end
+
+    test "rejects an empty queue name" do
+      assert_raise ArgumentError, ~r/expected :queue to be a non-empty binary/, fn ->
+        Consumer.start_link(queue: "", connect: false)
+      end
+    end
+
+    test "rejects mistyped options" do
+      assert_raise ArgumentError, ~r/expected :reconnect_min_ms to be a positive integer/, fn ->
+        Consumer.start_link(queue: "q", reconnect_min_ms: 0, connect: false)
+      end
+
+      assert_raise ArgumentError, ~r/expected :max_tracked_keys to be a positive integer/, fn ->
+        Consumer.start_link(queue: "q", max_tracked_keys: "lots", connect: false)
+      end
+
+      assert_raise ArgumentError, ~r/expected :key_resolver to be a function of arity 1/, fn ->
+        Consumer.start_link(queue: "q", key_resolver: fn -> :nope end, connect: false)
+      end
+
+      assert_raise ArgumentError, ~r/expected :connect to be a boolean/, fn ->
+        Consumer.start_link(queue: "q", connect: "false")
+      end
+    end
+
+    test "rejects a backoff floor above the ceiling" do
+      assert_raise ArgumentError, ~r/must not exceed :reconnect_max_ms/, fn ->
+        Consumer.start_link(
+          queue: "q",
+          reconnect_min_ms: 60_000,
+          reconnect_max_ms: 30_000,
+          connect: false
+        )
+      end
+    end
+
+    test "compares the floor against the default ceiling" do
+      assert_raise ArgumentError, ~r/must not exceed :reconnect_max_ms \(30000\)/, fn ->
+        Consumer.start_link(queue: "q", reconnect_min_ms: 60_000, connect: false)
+      end
+    end
+
+    test "accepts the documented option set" do
+      assert {:ok, pid} =
+               Consumer.start_link(
+                 queue: "q",
+                 url: "amqp://localhost",
+                 key_resolver: fn _ -> :k end,
+                 reconnect_min_ms: 100,
+                 reconnect_max_ms: 200,
+                 max_tracked_keys: 10,
+                 connect: false
+               )
+
+      assert is_pid(pid)
+    end
+
+    test "supervisor keys reach child_spec without tripping validation" do
+      children = [{Consumer, queue: "q.sup", connect: false, id: :custom, shutdown: 1_000}]
+
+      assert {:ok, sup} = Supervisor.start_link(children, strategy: :one_for_one)
+      assert [{:custom, _, :worker, _}] = Supervisor.which_children(sup)
     end
   end
 end

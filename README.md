@@ -141,6 +141,12 @@ Connection attempts run synchronously inside the consumer, so a call that lands 
 
 Connections are opened with `heartbeat: 10` and `connection_timeout: 5_000`. The heartbeat matches the AMQP client's own default and is set explicitly so it stays pinned. The timeout is a deliberate tightening: the client otherwise allows 60s via a URI and 50s via a keyword list, which is how long a connection attempt — and any `status/2` call waiting behind it — can block against a broker that accepts packets but never completes the handshake. Both are overridden by anything passed in `:connection_opts`.
 
+## Option validation
+
+`start_link/1` validates its options and raises `ArgumentError` before the process starts. Unknown keys are rejected rather than ignored: a mistyped `:reconnect_min` would otherwise pass through `Keyword.get/3` and silently yield the default, which is the failure mode that costs an afternoon. Types are checked, and a `:reconnect_min_ms` above `:reconnect_max_ms` is refused rather than quietly clamped.
+
+Validation is hand-rolled rather than delegated to an options library. Ten flat options with no nesting do not justify a fourth runtime dependency on a package whose argument is that the core stays small by choice.
+
 ### Bounding the tracked-key set
 
 The keys reported on disconnect are those the consumer has seen deliveries for, capped by `:max_tracked_keys` (default 1000). The cap matters because the default resolver returns the routing key: a wildcard binding can mint unbounded distinct keys. At the cap, the least-recently-seen key is evicted and `[:phi_accrual_amqp, :keys, :evicted]` fires — a signal that the binding or the resolver is broader than intended.
@@ -149,10 +155,13 @@ The keys reported on disconnect are those the consumer has seen deliveries for, 
 
 ```
 [:phi_accrual_amqp, :connection, :up]
-  metadata: %{queue}
+  measurements: %{system_time}
+  metadata:     %{queue}
 
 [:phi_accrual_amqp, :connection, :down]
-  metadata: %{queue, reason, keys}
+  measurements: %{tracked}
+  metadata:     %{queue, reason, keys}
+  # tracked counts what keys lists: the list is for policy, the count for a gauge
   # also fires on a server-initiated cancel, with reason: :server_cancelled
   # keys: the detector keys this consumer was feeding when delivery stopped
 
@@ -161,18 +170,22 @@ The keys reported on disconnect are those the consumer has seen deliveries for, 
   metadata:     %{queue, key, incoming_key, max_tracked_keys}
 
 [:phi_accrual_amqp, :consumer, :registered]
-  metadata: %{queue, consumer_tag}
+  measurements: %{system_time}
+  metadata:     %{queue, consumer_tag}
 
 [:phi_accrual_amqp, :consumer, :cancelled]
-  metadata: %{queue, consumer_tag, reason}
+  measurements: %{system_time}
+  metadata:     %{queue, consumer_tag, reason}
 
 [:phi_accrual_amqp, :sample, :received]
-  measurements: %{}
+  measurements: %{monotonic_time, system_time}
+  # monotonic_time is the exact value handed to PhiAccrual.observe/2
   metadata:     %{detector_key, envelope_timestamp, routing_key, exchange, queue}
   # envelope_timestamp may be nil; never the value passed to PhiAccrual.observe/2
 
 [:phi_accrual_amqp, :extract, :error]
-  metadata: %{reason, routing_key, exchange, queue}
+  measurements: %{system_time}
+  metadata:     %{reason, routing_key, exchange, queue}
   # reason ∈ [:no_detector_key, :resolver_raised]
 ```
 

@@ -60,12 +60,15 @@ defmodule PhiAccrualAmqp.Consumer do
   ## Telemetry
 
       [:phi_accrual_amqp, :connection, :up]
-        measurements: %{}
+        measurements: %{system_time}
         metadata:     %{queue}
 
       [:phi_accrual_amqp, :connection, :down]
-        measurements: %{}
+        measurements: %{tracked}
         metadata:     %{queue, reason, keys}
+        # tracked counts what :keys lists. The list is for policy; the
+        # count is for a gauge, since Telemetry.Metrics cannot aggregate
+        # a list.
         # keys lists the detector keys this consumer was feeding when
         # delivery stopped. φ for those keys will climb while the
         # transport is down; a policy layer can use this to decide the
@@ -78,21 +81,26 @@ defmodule PhiAccrualAmqp.Consumer do
         # new key displaces the least recently seen one.
 
       [:phi_accrual_amqp, :consumer, :registered]
-        measurements: %{}
+        measurements: %{system_time}
         metadata:     %{queue, consumer_tag}
 
       [:phi_accrual_amqp, :consumer, :cancelled]
-        measurements: %{}
+        measurements: %{system_time}
         metadata:     %{queue, consumer_tag, reason}
 
       [:phi_accrual_amqp, :sample, :received]
-        measurements: %{}
+        measurements: %{monotonic_time, system_time}
+        # monotonic_time is the exact value handed to
+        # PhiAccrual.observe/2, so a handler can derive inter-arrival
+        # intervals directly instead of reconstructing them — and the
+        # clock-discipline promise becomes inspectable rather than
+        # merely documented.
         metadata:     %{detector_key, envelope_timestamp, routing_key, exchange, queue}
         # envelope_timestamp may be nil if the publisher didn't set one;
         # it is NEVER what gets passed to PhiAccrual.observe/2.
 
       [:phi_accrual_amqp, :extract, :error]
-        measurements: %{}
+        measurements: %{system_time}
         metadata:     %{reason, routing_key, exchange, queue}
         # reason ∈ [:no_detector_key, :resolver_raised]
 
@@ -118,6 +126,18 @@ defmodule PhiAccrualAmqp.Consumer do
   # a keyword list, which is how long `open/1` — and therefore any
   # in-flight `status/2` call — can block against a blackholed broker.
   @default_conn_opts [heartbeat: 10, connection_timeout: 5_000]
+
+  @known_opts [
+    :queue,
+    :url,
+    :connection_opts,
+    :key_resolver,
+    :reconnect_min_ms,
+    :reconnect_max_ms,
+    :max_tracked_keys,
+    :connect,
+    :name
+  ]
 
   @type opts :: [
           queue: String.t(),
@@ -159,6 +179,8 @@ defmodule PhiAccrualAmqp.Consumer do
   """
   @spec start_link(opts()) :: GenServer.on_start()
   def start_link(opts) do
+    validate!(opts)
+
     case Keyword.fetch(opts, :name) do
       {:ok, name} -> GenServer.start_link(__MODULE__, opts, name: name)
       :error -> GenServer.start_link(__MODULE__, opts)
@@ -247,6 +269,79 @@ defmodule PhiAccrualAmqp.Consumer do
     GenServer.call(server, :status, timeout)
   end
 
+  # Hand-rolled rather than pulled in as a fourth runtime dependency:
+  # ten flat options with no nesting do not justify one on a package
+  # whose argument is that the core stays small by choice. The check
+  # that earns its keep is the unknown-key one — a typo'd
+  # :reconnect_min sails through Keyword.get/3 and silently yields the
+  # default, which is the failure mode that costs an afternoon.
+  defp validate!(opts) do
+    unless Keyword.keyword?(opts) do
+      raise ArgumentError, "expected a keyword list, got: #{inspect(opts)}"
+    end
+
+    case Enum.uniq(Keyword.keys(opts)) -- @known_opts do
+      [] ->
+        :ok
+
+      unknown ->
+        raise ArgumentError,
+              "unknown option#{if length(unknown) > 1, do: "s"} " <>
+                "#{inspect(unknown)}. Known options: #{inspect(@known_opts)}"
+    end
+
+    unless Keyword.has_key?(opts, :queue) do
+      raise ArgumentError, ":queue is required"
+    end
+
+    check!(opts, :queue, &(is_binary(&1) and &1 != ""), "a non-empty binary")
+    check!(opts, :url, &is_binary/1, "a binary")
+
+    check!(
+      opts,
+      :connection_opts,
+      &(is_binary(&1) or Keyword.keyword?(&1)),
+      "a binary or keyword list"
+    )
+
+    check!(opts, :key_resolver, &is_function(&1, 1), "a function of arity 1")
+    check!(opts, :reconnect_min_ms, &pos_int?/1, "a positive integer")
+    check!(opts, :reconnect_max_ms, &pos_int?/1, "a positive integer")
+    check!(opts, :max_tracked_keys, &pos_int?/1, "a positive integer")
+    check!(opts, :connect, &is_boolean/1, "a boolean")
+    check!(opts, :name, &valid_name?/1, "an atom, {:global, term} or {:via, module, term}")
+
+    min = Keyword.get(opts, :reconnect_min_ms, @default_reconnect_min_ms)
+    max = Keyword.get(opts, :reconnect_max_ms, @default_reconnect_max_ms)
+
+    if min > max do
+      raise ArgumentError,
+            ":reconnect_min_ms (#{min}) must not exceed :reconnect_max_ms (#{max})"
+    end
+
+    :ok
+  end
+
+  defp check!(opts, key, valid?, expected) do
+    case Keyword.fetch(opts, key) do
+      {:ok, value} ->
+        unless valid?.(value) do
+          raise ArgumentError,
+                "expected #{inspect(key)} to be #{expected}, got: #{inspect(value)}"
+        end
+
+      :error ->
+        :ok
+    end
+  end
+
+  defp pos_int?(value), do: is_integer(value) and value > 0
+
+  defp valid_name?(name) when is_atom(name), do: true
+  defp valid_name?({:global, _}), do: true
+  defp valid_name?({:via, module, _}) when is_atom(module), do: true
+  defp valid_name?(_), do: false
+
   @impl true
   def init(opts) do
     queue = Keyword.fetch!(opts, :queue)
@@ -296,7 +391,7 @@ defmodule PhiAccrualAmqp.Consumer do
 
         :telemetry.execute(
           [:phi_accrual_amqp, :connection, :up],
-          %{},
+          %{system_time: System.system_time()},
           %{queue: state.queue}
         )
 
@@ -322,7 +417,7 @@ defmodule PhiAccrualAmqp.Consumer do
   def handle_info({:basic_consume_ok, %{consumer_tag: ctag}}, state) do
     :telemetry.execute(
       [:phi_accrual_amqp, :consumer, :registered],
-      %{},
+      %{system_time: System.system_time()},
       %{queue: state.queue, consumer_tag: ctag}
     )
 
@@ -337,7 +432,7 @@ defmodule PhiAccrualAmqp.Consumer do
         {:ok, %Envelope{detector_key: key, timestamp: ts}} ->
           :telemetry.execute(
             [:phi_accrual_amqp, :sample, :received],
-            %{},
+            %{monotonic_time: receipt_ts, system_time: System.system_time()},
             %{
               detector_key: key,
               envelope_timestamp: ts,
@@ -353,7 +448,7 @@ defmodule PhiAccrualAmqp.Consumer do
         {:error, reason} ->
           :telemetry.execute(
             [:phi_accrual_amqp, :extract, :error],
-            %{},
+            %{system_time: System.system_time()},
             %{
               reason: reason,
               routing_key: Map.get(meta, :routing_key),
@@ -371,7 +466,7 @@ defmodule PhiAccrualAmqp.Consumer do
   def handle_info({:basic_cancel, %{consumer_tag: ctag}}, state) do
     :telemetry.execute(
       [:phi_accrual_amqp, :consumer, :cancelled],
-      %{},
+      %{system_time: System.system_time()},
       %{queue: state.queue, consumer_tag: ctag, reason: :server_cancelled}
     )
 
@@ -485,7 +580,7 @@ defmodule PhiAccrualAmqp.Consumer do
   defp emit_connection_down(state, reason) do
     :telemetry.execute(
       [:phi_accrual_amqp, :connection, :down],
-      %{},
+      %{tracked: map_size(state.seen_keys)},
       %{
         queue: state.queue,
         reason: reason,

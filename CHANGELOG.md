@@ -8,6 +8,13 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
+- **Option validation in `start_link/1`** — raises `ArgumentError` on
+  unknown keys, mistyped values, a missing or empty `:queue`, and a
+  `:reconnect_min_ms` above `:reconnect_max_ms`. Unknown keys matter
+  most: a mistyped `:reconnect_min` previously passed through
+  `Keyword.get/3` and silently yielded the default. Hand-rolled rather
+  than delegated to an options library, which would be a fourth runtime
+  dependency for ten flat options.
 - **`PhiAccrualAmqp.Consumer.status/2`** — reports `:connected?`,
   `:queue`, `:consumer_tag`, `:backoff_ms`, `:disconnected_since`,
   `:last_delivery_at` and `:keys_tracked`. The two timestamps are local
@@ -40,6 +47,23 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Changed
 
+- **Every telemetry event now carries a non-empty measurement map.**
+  `[:sample, :received]` gains `%{monotonic_time, system_time}`, where
+  `monotonic_time` is the exact value handed to `PhiAccrual.observe/2`
+  — so a handler can derive inter-arrival intervals directly instead of
+  reconstructing them, and the clock-discipline promise becomes
+  inspectable rather than merely documented. `[:connection, :down]`
+  gains `%{tracked}`, counting what its `:keys` metadata lists, because
+  `Telemetry.Metrics` cannot aggregate a list. The remaining events
+  carry `%{system_time}`. Handlers that pattern-matched on `%{}`
+  continue to match; handlers that asserted an empty map do not.
+
+  This is `phi_accrual_amqp`'s own committed telemetry schema. It is
+  not a step toward unifying payloads with `phi_accrual_udp`: the
+  transports are deliberate specializations of a transport-agnostic
+  core, the only contract between them is `PhiAccrual.observe/2`, and
+  per-transport handlers are the intended model rather than a gap left
+  to close.
 - **Connections are opened with `heartbeat: 10` and
   `connection_timeout: 5_000`.** The heartbeat matches the AMQP
   client's own default and is now pinned explicitly. The timeout

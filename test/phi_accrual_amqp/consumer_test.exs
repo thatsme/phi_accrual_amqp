@@ -47,15 +47,21 @@ defmodule PhiAccrualAmqp.ConsumerTest do
       pid = start_offline()
       ref = subscribe([[:phi_accrual_amqp, :sample, :received]])
 
-      send(pid, {:basic_deliver, "payload-ignored",
-                 %{routing_key: "heartbeat.node_a", exchange: "ha", timestamp: 42}})
+      send(
+        pid,
+        {:basic_deliver, "payload-ignored",
+         %{routing_key: "heartbeat.node_a", exchange: "ha", timestamp: 42}}
+      )
 
       assert_receive {:event, ^ref, _, %{},
-                      %{detector_key: "heartbeat.node_a",
+                      %{
+                        detector_key: "heartbeat.node_a",
                         envelope_timestamp: 42,
                         routing_key: "heartbeat.node_a",
                         exchange: "ha",
-                        queue: "test.q"}}, 500
+                        queue: "test.q"
+                      }},
+                     500
     end
 
     test "envelope_timestamp is nil when publisher set none" do
@@ -82,8 +88,8 @@ defmodule PhiAccrualAmqp.ConsumerTest do
 
       send(pid, {:basic_deliver, "p", %{routing_key: "", exchange: ""}})
 
-      assert_receive {:event, ^ref, _, _,
-                      %{reason: :no_detector_key, queue: "test.q"}}, 500
+      assert_receive {:event, ^ref, _, _, %{reason: :no_detector_key, queue: "test.q"}},
+                     500
     end
 
     test "emits :extract :error with :resolver_raised when resolver throws" do
@@ -102,8 +108,7 @@ defmodule PhiAccrualAmqp.ConsumerTest do
       # Wildly skewed envelope timestamp. The detector should NOT see it;
       # it should see local monotonic receipt time. We can't observe the
       # exact value, but we can confirm the key was tracked at all.
-      send(pid, {:basic_deliver, "p",
-                 %{routing_key: "x", exchange: "", timestamp: 0}})
+      send(pid, {:basic_deliver, "p", %{routing_key: "x", exchange: "", timestamp: 0}})
 
       Process.sleep(50)
 
@@ -120,8 +125,8 @@ defmodule PhiAccrualAmqp.ConsumerTest do
 
       send(pid, {:basic_consume_ok, %{consumer_tag: "ctag-1"}})
 
-      assert_receive {:event, ^ref, _, _,
-                      %{queue: "test.q", consumer_tag: "ctag-1"}}, 500
+      assert_receive {:event, ^ref, _, _, %{queue: "test.q", consumer_tag: "ctag-1"}},
+                     500
     end
 
     test ":consumer :cancelled fires on server-initiated basic_cancel" do
@@ -136,9 +141,8 @@ defmodule PhiAccrualAmqp.ConsumerTest do
       send(pid, {:basic_cancel, %{consumer_tag: "ctag-1"}})
 
       assert_receive {:event, ^ref, _, _,
-                      %{queue: "test.q",
-                        consumer_tag: "ctag-1",
-                        reason: :server_cancelled}}, 500
+                      %{queue: "test.q", consumer_tag: "ctag-1", reason: :server_cancelled}},
+                     500
     end
 
     test "basic_cancel_ok is benign" do
@@ -153,6 +157,306 @@ defmodule PhiAccrualAmqp.ConsumerTest do
       send(pid, {:something_random, 1, 2, 3})
       Process.sleep(20)
       assert Process.alive?(pid)
+    end
+  end
+
+  describe "child_spec/1" do
+    test "defaults :id to {Consumer, queue} so per-queue children are distinct" do
+      assert %{id: {Consumer, "heartbeats.node_a"}} =
+               Consumer.child_spec(queue: "heartbeats.node_a")
+
+      assert %{id: {Consumer, "heartbeats.node_b"}} =
+               Consumer.child_spec(queue: "heartbeats.node_b")
+    end
+
+    test "defaults :id to :name when one is given" do
+      assert %{id: :hb_a} = Consumer.child_spec(name: :hb_a, queue: "q")
+    end
+
+    test "honors :id, :restart and :shutdown" do
+      spec =
+        Consumer.child_spec(
+          queue: "q",
+          id: :custom,
+          restart: :transient,
+          shutdown: 1_000
+        )
+
+      assert %{id: :custom, restart: :transient, shutdown: 1_000, type: :worker} = spec
+    end
+
+    test "supervisor keys are not forwarded to start_link/1" do
+      %{start: {Consumer, :start_link, [start_opts]}} =
+        Consumer.child_spec(queue: "q", id: :custom, restart: :transient, shutdown: 1_000)
+
+      assert start_opts == [queue: "q"]
+    end
+
+    test "defaults match use GenServer" do
+      assert %{restart: :permanent, shutdown: 5_000, type: :worker} =
+               Consumer.child_spec(queue: "q")
+    end
+
+    test "two consumers on different queues start under one supervisor" do
+      children = [
+        {Consumer, queue: "heartbeats.node_a", connect: false},
+        {Consumer, queue: "heartbeats.node_b", connect: false}
+      ]
+
+      assert {:ok, sup} = Supervisor.start_link(children, strategy: :one_for_one)
+
+      assert length(Supervisor.which_children(sup)) == 2
+    end
+  end
+
+  describe "start_link/1 naming" do
+    test "runs unnamed when no :name is given, so instances do not collide" do
+      assert {:ok, a} = Consumer.start_link(queue: "q.a", connect: false)
+      assert {:ok, b} = Consumer.start_link(queue: "q.b", connect: false)
+
+      assert a != b
+      refute Process.whereis(Consumer)
+    end
+
+    test "registers under :name when given" do
+      name = :"consumer_named_#{System.unique_integer([:positive])}"
+      assert {:ok, pid} = Consumer.start_link(name: name, queue: "q", connect: false)
+
+      assert Process.whereis(name) == pid
+    end
+  end
+
+  describe "backoff_delay/3" do
+    test "first attempt waits exactly the floor" do
+      assert {1_000, 2_000} = Consumer.backoff_delay(0, 1_000, 30_000)
+    end
+
+    test "ceiling doubles per attempt and caps at max" do
+      assert {_, 2_000} = Consumer.backoff_delay(1_000, 1_000, 30_000)
+      assert {_, 4_000} = Consumer.backoff_delay(2_000, 1_000, 30_000)
+      assert {_, 30_000} = Consumer.backoff_delay(16_000, 1_000, 30_000)
+      assert {_, 30_000} = Consumer.backoff_delay(30_000, 1_000, 30_000)
+    end
+
+    test "delay always lands within the floor and the current ceiling" do
+      for _ <- 1..500 do
+        {delay, _next} = Consumer.backoff_delay(8_000, 1_000, 30_000)
+        assert delay >= 1_000
+        assert delay <= 8_000
+      end
+    end
+
+    test "delay never exceeds max even when backoff overshoots it" do
+      for _ <- 1..200 do
+        {delay, next} = Consumer.backoff_delay(90_000, 1_000, 30_000)
+        assert delay <= 30_000
+        assert next == 30_000
+      end
+    end
+
+    test "draws are spread rather than identical" do
+      delays =
+        for _ <- 1..200, into: MapSet.new() do
+          {delay, _} = Consumer.backoff_delay(20_000, 1_000, 30_000)
+          delay
+        end
+
+      # Undithered doubling would collapse this to a single value.
+      assert MapSet.size(delays) > 50
+    end
+
+    test "degenerate config where min exceeds max still yields the floor" do
+      assert {5_000, 5_000} = Consumer.backoff_delay(0, 5_000, 1_000)
+    end
+  end
+
+  describe "disconnect legibility" do
+    defp deliver(pid, routing_key) do
+      send(pid, {:basic_deliver, "p", %{routing_key: routing_key, exchange: "x"}})
+    end
+
+    # Nothing listens on port 1, so :connect fails fast and drives the
+    # real connection-down path rather than a synthesized :DOWN message.
+    defp start_unreachable(opts) do
+      start_offline(
+        [
+          connection_opts: [host: "127.0.0.1", port: 1, connection_timeout: 200],
+          reconnect_min_ms: 60_000
+        ] ++ opts
+      )
+    end
+
+    test ":connection :down carries the keys this consumer was feeding" do
+      pid = start_unreachable([])
+      ref = subscribe([[:phi_accrual_amqp, :connection, :down]])
+
+      deliver(pid, "heartbeat.node_a")
+      deliver(pid, "heartbeat.node_b")
+      # let the deliveries land before provoking the disconnect
+      _ = :sys.get_state(pid)
+
+      send(pid, :connect)
+
+      assert_receive {:event, ^ref, [:phi_accrual_amqp, :connection, :down], %{},
+                      %{queue: "test.q", keys: keys}},
+                     8_000
+
+      assert Enum.sort(keys) == ["heartbeat.node_a", "heartbeat.node_b"]
+    end
+
+    test "keys is empty before any delivery has been seen" do
+      pid = start_unreachable([])
+      ref = subscribe([[:phi_accrual_amqp, :connection, :down]])
+
+      send(pid, :connect)
+
+      assert_receive {:event, ^ref, _, %{}, %{keys: []}}, 8_000
+    end
+
+    test "the consumer never untracks keys it does not own" do
+      pid = start_unreachable([])
+      deliver(pid, "heartbeat.node_owned")
+      _ = :sys.get_state(pid)
+
+      send(pid, :connect)
+      _ = :sys.get_state(pid)
+
+      # untrack/1 would destroy the estimator's calibration; the
+      # consumer must leave it standing so phi accrues honestly.
+      assert "heartbeat.node_owned" in PhiAccrual.tracked_nodes()
+    end
+
+    test "deliveries that fail extraction do not enter the key set" do
+      pid = start_unreachable([])
+      ref = subscribe([[:phi_accrual_amqp, :connection, :down]])
+
+      send(pid, {:basic_deliver, "p", %{routing_key: "", exchange: "x"}})
+      _ = :sys.get_state(pid)
+
+      send(pid, :connect)
+
+      assert_receive {:event, ^ref, _, %{}, %{keys: []}}, 8_000
+    end
+  end
+
+  describe "tracked-key bound" do
+    test "the key set is capped and evicts least-recently-seen" do
+      pid = start_offline(max_tracked_keys: 2)
+      ref = subscribe([[:phi_accrual_amqp, :keys, :evicted]])
+
+      deliver(pid, "k.a")
+      deliver(pid, "k.b")
+      _ = :sys.get_state(pid)
+      deliver(pid, "k.c")
+
+      assert_receive {:event, ^ref, [:phi_accrual_amqp, :keys, :evicted], %{tracked: 2},
+                      %{key: "k.a", incoming_key: "k.c", max_tracked_keys: 2}},
+                     500
+    end
+
+    test "re-seeing a known key does not evict anything" do
+      pid = start_offline(max_tracked_keys: 2)
+      ref = subscribe([[:phi_accrual_amqp, :keys, :evicted]])
+
+      deliver(pid, "k.a")
+      deliver(pid, "k.b")
+      deliver(pid, "k.a")
+      _ = :sys.get_state(pid)
+
+      refute_receive {:event, ^ref, [:phi_accrual_amqp, :keys, :evicted], _, _}, 100
+    end
+
+    test "the key set never exceeds the cap under churn" do
+      pid = start_offline(max_tracked_keys: 3)
+
+      for n <- 1..50, do: deliver(pid, "k.#{n}")
+
+      state = :sys.get_state(pid)
+      assert map_size(state.seen_keys) == 3
+    end
+  end
+
+  describe "status/2" do
+    test "reports a never-connected consumer as disconnected" do
+      pid = start_offline()
+
+      assert %{
+               connected?: false,
+               queue: "test.q",
+               consumer_tag: nil,
+               last_delivery_at: nil,
+               keys_tracked: 0,
+               disconnected_since: since
+             } = Consumer.status(pid)
+
+      assert is_integer(since)
+    end
+
+    test "counts the detector keys seen so far" do
+      pid = start_offline()
+      deliver(pid, "k.a")
+      deliver(pid, "k.b")
+      deliver(pid, "k.a")
+
+      assert %{keys_tracked: 2, last_delivery_at: at} = Consumer.status(pid)
+      assert is_integer(at)
+    end
+
+    test "keys_tracked honours the cap" do
+      pid = start_offline(max_tracked_keys: 2)
+      for n <- 1..10, do: deliver(pid, "k.#{n}")
+
+      assert %{keys_tracked: 2} = Consumer.status(pid)
+    end
+
+    test "a server cancel leaves the consumer marked disconnected" do
+      pid = start_offline()
+      before = Consumer.status(pid)
+
+      send(pid, {:basic_cancel, %{consumer_tag: "ctag-1"}})
+      _ = :sys.get_state(pid)
+
+      assert %{connected?: false, consumer_tag: nil, disconnected_since: since} =
+               Consumer.status(pid)
+
+      # the field was already set at init; a cancel must not clear it
+      assert is_integer(since)
+      assert since >= before.disconnected_since
+    end
+
+    test "a server cancel emits :connection :down carrying the keys" do
+      pid = start_offline()
+      ref = subscribe([[:phi_accrual_amqp, :connection, :down]])
+
+      deliver(pid, "k.cancelled")
+      _ = :sys.get_state(pid)
+
+      send(pid, {:basic_cancel, %{consumer_tag: "ctag-1"}})
+
+      assert_receive {:event, ^ref, [:phi_accrual_amqp, :connection, :down], %{},
+                      %{reason: :server_cancelled, keys: ["k.cancelled"]}},
+                     1_000
+    end
+
+    test "a server cancel emits connection down exactly once" do
+      pid = start_offline()
+      ref = subscribe([[:phi_accrual_amqp, :connection, :down]])
+
+      send(pid, {:basic_cancel, %{consumer_tag: "ctag-1"}})
+      _ = :sys.get_state(pid)
+
+      assert_receive {:event, ^ref, _, _, %{reason: :server_cancelled}}, 1_000
+      refute_receive {:event, ^ref, _, _, _}, 200
+    end
+
+    test "backoff_ms advances as reconnects are scheduled" do
+      pid = start_offline(reconnect_min_ms: 1_000, reconnect_max_ms: 30_000)
+
+      send(pid, {:basic_cancel, %{consumer_tag: "ctag-1"}})
+      _ = :sys.get_state(pid)
+
+      assert %{backoff_ms: backoff} = Consumer.status(pid)
+      assert backoff > 0
     end
   end
 end

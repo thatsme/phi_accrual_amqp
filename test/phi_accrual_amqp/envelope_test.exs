@@ -6,12 +6,14 @@ defmodule PhiAccrualAmqp.EnvelopeTest do
   describe "extract/2 with default resolver" do
     test "extracts routing_key as detector_key" do
       meta = %{routing_key: "heartbeat.node_a", exchange: "ha"}
+
       assert {:ok, %Envelope{detector_key: "heartbeat.node_a", timestamp: nil}} =
                Envelope.extract(meta)
     end
 
     test "extracts envelope timestamp when present" do
       meta = %{routing_key: "x", timestamp: 1_700_000_000}
+
       assert {:ok, %Envelope{detector_key: "x", timestamp: 1_700_000_000}} =
                Envelope.extract(meta)
     end

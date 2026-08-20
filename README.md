@@ -43,6 +43,21 @@ children = [
 
 Topology — exchange declaration, queue declaration, bindings — is your application's responsibility. The consumer subscribes to an existing queue.
 
+## Running several consumers
+
+`Consumer` builds its own child specification, so one consumer per queue can sit in the same supervision tree with no further ceremony:
+
+```elixir
+children = [
+  {PhiAccrualAmqp.Consumer, queue: "heartbeats.node_a"},
+  {PhiAccrualAmqp.Consumer, queue: "heartbeats.node_b"}
+]
+```
+
+The child `:id` defaults to `{PhiAccrualAmqp.Consumer, queue}`, or to `:name` when one is given. The standard supervisor keys `:id`, `:restart` and `:shutdown` are read from the same keyword list as the consumer options and are not forwarded to `start_link/1`.
+
+A consumer runs unnamed unless `:name` is passed. A name is only needed for processes that application code addresses directly.
+
 ## Mapping deliveries to detector keys
 
 The detector key is what gets passed to `PhiAccrual.observe/2`. It is extracted from the delivery envelope by a `:key_resolver` function — `(meta -> term() | nil)`.
@@ -85,7 +100,50 @@ In AMQP, "delivery received" proves three things are alive in combination: publi
 
 ## Connection lifecycle
 
-The consumer manages its own connection, channel, and subscription. On startup it schedules an async connect so the supervisor can come up before the broker is reachable. On any failure — broker unreachable, channel error, server-initiated `basic.cancel`, connection or channel process death — it tears down what it has and reconnects with exponential backoff between `:reconnect_min_ms` (default 1s) and `:reconnect_max_ms` (default 30s). This deliberately differs from `phi_accrual_udp`'s fail-fast `:gen_udp.open` — AMQP connections are remote-broker contracts that blip during normal operation.
+The consumer manages its own connection, channel, and subscription. On startup it schedules an async connect so the supervisor can come up before the broker is reachable. On any failure — broker unreachable, channel error, server-initiated `basic.cancel`, connection or channel process death — it tears down what it has and reconnects with jittered exponential backoff between `:reconnect_min_ms` (default 1s) and `:reconnect_max_ms` (default 30s). The ceiling doubles per attempt; the delay is drawn uniformly between the floor and that ceiling, so a fleet of consumers attached to a restarting broker spreads its retries instead of stampeding in lockstep. This deliberately differs from `phi_accrual_udp`'s fail-fast `:gen_udp.open` — AMQP connections are remote-broker contracts that blip during normal operation.
+
+## What a disconnect means for the detector
+
+When the connection drops, the consumer stops feeding `PhiAccrual.observe/2` and phi for the affected keys climbs. That is the detector answering its question correctly — nothing has been heard from those entities. It is not a malfunction, and the consumer does not attempt to correct it.
+
+The consumer deliberately takes no action on the estimators:
+
+- It does not own them. `PhiAccrual.observe/2` auto-tracks, so the estimator is materialised by core rather than by this package — and a UDP listener, a `DistributionPing` source, or application code may be feeding the same key from another angle.
+- The only lever core exposes is `PhiAccrual.untrack/1`, which terminates the estimator and destroys its calibration: mean, variance and sample count alike. Applying that to a forty-second broker blip forces a rebuild from `:insufficient_data`, a worse outcome than the phi excursion it would avoid.
+
+Core is positioned as observability-grade, with thresholding and policy left to the consuming application. The consumer's obligation is therefore legibility, not correction: `[:phi_accrual_amqp, :connection, :down]` carries the `keys` that were being fed, which is what a policy layer needs in order to read a phi excursion on those keys as a transport outage rather than as evidence about the entities themselves.
+
+An application that genuinely wants estimators torn down on disconnect can attach a handler to that event and call `PhiAccrual.untrack/1` itself. It is not offered as configuration, because the sharp edge belongs with the application that chose it.
+
+A server-initiated `basic.cancel` counts as a disconnect for this purpose. The consumer tears the connection down and reconnects, so `[:phi_accrual_amqp, :connection, :down]` fires with `reason: :server_cancelled` alongside the `[:consumer, :cancelled]` event that carries the consumer tag. Keys appear on the connection event only, so a policy layer attaches to one name and never has to reconcile overlapping key sets.
+
+## Inspecting a consumer
+
+`PhiAccrualAmqp.Consumer.status/2` reports what a health endpoint needs:
+
+```elixir
+%{
+  connected?: true,
+  queue: "phi.heartbeats",
+  consumer_tag: "amq.ctag-...",
+  backoff_ms: 1000,
+  disconnected_since: nil,
+  last_delivery_at: -576460733,
+  keys_tracked: 12
+}
+```
+
+`:disconnected_since` and `:last_delivery_at` are local monotonic milliseconds from the same clock as `:erlang.monotonic_time(:millisecond)`; durations come from subtracting them from a fresh reading. They are not wall clocks and mean nothing off this node.
+
+Connection attempts run synchronously inside the consumer, so a call that lands during one waits for it to finish. The timeout argument defaults to 5000 rather than `:infinity` for that reason, and callers should expect the exit — a health check is exactly the caller most likely to arrive mid-outage.
+
+## Connection defaults
+
+Connections are opened with `heartbeat: 10` and `connection_timeout: 5_000`. The heartbeat matches the AMQP client's own default and is set explicitly so it stays pinned. The timeout is a deliberate tightening: the client otherwise allows 60s via a URI and 50s via a keyword list, which is how long a connection attempt — and any `status/2` call waiting behind it — can block against a broker that accepts packets but never completes the handshake. Both are overridden by anything passed in `:connection_opts`.
+
+### Bounding the tracked-key set
+
+The keys reported on disconnect are those the consumer has seen deliveries for, capped by `:max_tracked_keys` (default 1000). The cap matters because the default resolver returns the routing key: a wildcard binding can mint unbounded distinct keys. At the cap, the least-recently-seen key is evicted and `[:phi_accrual_amqp, :keys, :evicted]` fires — a signal that the binding or the resolver is broader than intended.
 
 ## Telemetry
 
@@ -94,7 +152,13 @@ The consumer manages its own connection, channel, and subscription. On startup i
   metadata: %{queue}
 
 [:phi_accrual_amqp, :connection, :down]
-  metadata: %{queue, reason}
+  metadata: %{queue, reason, keys}
+  # also fires on a server-initiated cancel, with reason: :server_cancelled
+  # keys: the detector keys this consumer was feeding when delivery stopped
+
+[:phi_accrual_amqp, :keys, :evicted]
+  measurements: %{tracked}
+  metadata:     %{queue, key, incoming_key, max_tracked_keys}
 
 [:phi_accrual_amqp, :consumer, :registered]
   metadata: %{queue, consumer_tag}
